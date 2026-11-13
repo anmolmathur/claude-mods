@@ -1,5 +1,7 @@
 # model-advisor
 
-Reads the draft in your chat input and recommends which Claude model fits the task (Haiku 5.5, Sonnet 5.5, Opus 5.5 or Fable 5.2) and how much effort to use, with a one-sentence reason. It prefers the cheapest model that will do the job well. If the suggestion differs from the model you are on, a "Switch to …" button runs `/model <name>` for you; your draft stays in the box and nothing is sent.
+One click picks the right Claude model for the task in your draft and switches to it.
 
-Trigger it with the "Which model?" button above the input, `ctrl+x m` (set in `~/.claude/keybindings.json` as `"ctrl+x m": "command:model-advice"`), `ctrl+x tab` then `m`, or `/model-advice [task]`. The advice itself comes from one small Haiku call.
+Press **Pick model** above the chat input (or `ctrl+x m`, or `ctrl+x tab` then `m`, or `/model-advice [task]`). A small Haiku call reads your draft and chooses a model (Haiku 5.5, Sonnet 5.5, Opus 5.5 or Fable 5.2) and an effort level (low, medium, high, max), preferring the cheapest model that will do the job well. The mod then runs `/model` and `/effort` for you, checks that the switch took, and shows what it chose and why. **Undo** puts the previous model back. Your draft stays in the box and nothing is sent.
+
+If you are already on the suggested model, only the effort is set. If a switch is refused or does not take, the band says so instead of claiming it worked.

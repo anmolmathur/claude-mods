@@ -4,7 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Advice, AdvisorStatus, Effort, ModelAlias } from '../types'
 
 const IDLE: AdvisorStatus = { kind: 'idle' }
-const status = atom({ plugin: 'model-advisor', key: 'status' } as const, IDLE)
+// Change the tag when AdvisorStatus changes: it declines what an earlier
+// version stored, which outlives a reload.
+const status = atom({ plugin: 'model-advisor', key: 'status' } as const, IDLE, { shape: 'status-2' })
 const lastDraft = atom({ plugin: 'model-advisor', key: 'lastDraft' } as const, '')
 
 const NAMES: Record<ModelAlias, string> = {
@@ -20,7 +22,7 @@ const SYSTEM = `You pick the right Claude model for a task a person is about to 
 
 Models, cheapest/fastest first:
 - haiku (Haiku 5.5): quick, cheap. Simple lookups, one-line fixes, renames, formatting, explaining a small snippet, short factual questions, running a known command.
-- sonnet (Sonnet 5.5): the everyday default. Normal feature work, bug fixes in a few files, writing tests, docs, scripts, code review of a modest diff, data wrangling.
+- sonnet (Sonnet 5.5): the everyday default. Normal feature work, bug fixes in a few files, writing tests, docs, scripts, code review of a modest diff, data wrangling, investigating a reported UI or deploy issue.
 - opus (Opus 5.5): hard work. Multi-file refactors, subtle debugging, architecture/design trade-offs, security review, migrations, long multi-step agentic tasks, ambiguous requirements.
 - fable (Fable 5.2): the most capable and most expensive. Only for the hardest problems: novel algorithms, deep research-grade reasoning, very large system redesigns, problems where opus is likely to fail.
 
@@ -52,16 +54,35 @@ function parseAdvice(text: string, current: string): Advice | undefined {
   }
 }
 
-function onModel(current: string, model: ModelAlias): boolean {
-  return current.toLowerCase().includes(model)
+function aliasOf(model: string): ModelAlias | undefined {
+  const lower = model.toLowerCase()
+  return MODELS.find(alias => lower.includes(alias))
 }
 
-function describe(a: Advice): string {
-  const here = onModel(a.current, a.model) ? ' (you are already on it)' : ` (you are on ${a.current})`
-  return `Suggested: ${NAMES[a.model]}, ${a.effort} effort${here}. ${a.reason}`
+function label(a: Advice): string {
+  return `${NAMES[a.model]} · ${a.effort} effort`
 }
 
-async function advise($: EngineInterface, fallback?: string): Promise<string | undefined> {
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Runs a slash command as if typed; throws with its reason when refused. */
+async function runCommand($: EngineInterface, command: string, args: string): Promise<void> {
+  const r = (await $.command.run({ command, args })) as { deny?: string }
+  if (r && typeof r.deny === 'string') throw new Error(`/${command} ${args}: ${r.deny}`)
+}
+
+async function setStatus($: EngineInterface, next: AdvisorStatus): Promise<void> {
+  await update($, status, () => next)
+}
+
+/**
+ * One click: read the draft, ask for advice, and apply it at once by running
+ * `/model` and `/effort` as if typed. The draft stays in the box; nothing is
+ * sent. Returns a line describing what happened.
+ */
+async function adviseAndApply($: EngineInterface, fallback?: string): Promise<string> {
   if ((await read($, status)).kind === 'busy') return 'Already checking.'
 
   const box = await $.prompt.read()
@@ -72,7 +93,7 @@ async function advise($: EngineInterface, fallback?: string): Promise<string | u
     return 'Nothing to assess: the prompt box is empty.'
   }
 
-  await update($, status, () => ({ kind: 'busy' }) as AdvisorStatus)
+  await setStatus($, { kind: 'busy' })
   try {
     const current = await $.session.model()
     const r = await $.model.complete({
@@ -86,35 +107,64 @@ async function advise($: EngineInterface, fallback?: string): Promise<string | u
     const advice = r.isAnswered ? parseAdvice(r.text, current) : undefined
     if (!advice) {
       const message = r.isAnswered ? 'could not read the advice' : r.reason
-      await update($, status, () => ({ kind: 'error', message }) as AdvisorStatus)
+      await setStatus($, { kind: 'error', message })
+      $.ui.toast(`Model advisor failed (${message}).`)
       return `Model advisor failed (${message}).`
     }
-    await update($, status, () => ({ kind: 'advice', advice }) as AdvisorStatus)
-    return describe(advice)
+
+    const isModelChanged = aliasOf(current) !== advice.model
+    if (isModelChanged) {
+      await runCommand($, 'model', advice.model)
+      // Trust the session, not the command: confirm the switch took.
+      const now = await $.session.model()
+      if (aliasOf(now) !== advice.model) {
+        throw new Error(`asked for ${NAMES[advice.model]} but the session is still on ${now}`)
+      }
+    }
+    await runCommand($, 'effort', advice.effort)
+
+    if (isModelChanged) {
+      await setStatus($, { kind: 'applied', advice, previous: current, isModelChanged })
+      $.ui.toast(`Switched to ${label(advice)}. Your draft is untouched.`)
+      return `Switched to ${label(advice)} (was ${current}). ${advice.reason}`
+    }
+    await setStatus($, { kind: 'kept', advice })
+    $.ui.toast(`Already on the right model: ${label(advice)}.`)
+    return `Already on ${NAMES[advice.model]}; effort set to ${advice.effort}. ${advice.reason}`
+  } catch (err) {
+    const message = errorText(err)
+    await setStatus($, { kind: 'error', message })
+    $.ui.toast(`Model advisor could not switch: ${message}`)
+    return `Model advisor could not switch: ${message}`
   } finally {
-    if ((await read($, status)).kind === 'busy') await update($, status, () => IDLE)
+    if ((await read($, status)).kind === 'busy') await setStatus($, IDLE)
   }
 }
 
-async function switchTo($: EngineInterface, model: ModelAlias): Promise<void> {
-  // Runs `/model <alias>` as if typed; the draft in the box is left alone.
-  await $.command.run({ command: 'model', args: model })
-  await update($, status, () => ({ kind: 'switched', model }) as AdvisorStatus)
+async function undo($: EngineInterface, previous: string): Promise<void> {
+  try {
+    await runCommand($, 'model', aliasOf(previous) ?? previous)
+    await setStatus($, { kind: 'undone', model: previous })
+  } catch (err) {
+    await setStatus($, { kind: 'error', message: errorText(err) })
+  }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'model-advice',
-      description: 'Recommend which Claude model and effort fit the task in your draft prompt',
+      description: 'Pick the right Claude model and effort for your draft and switch to it (never sends)',
       argumentHint: '[task]',
     })
     return next(e)
   })
 
   on('command.run', { command: 'model-advice' }, async ($, e) => {
-    const text = await advise($, e.args)
-    return text ? { text } : {}
+    // The switch runs `/model` and `/effort`, which queue behind this command:
+    // start it without waiting so the command can finish first.
+    void adviseAndApply($, e.args).catch(() => undefined)
+    return { text: 'Checking which model fits your draft…' }
   })
 
   on('prompt.edit', async ($, e, next) => {
@@ -123,10 +173,10 @@ export const register: Register = on => {
     return r
   })
 
-  // A sent (or cleared) prompt makes the advice stale.
+  // A sent (or cleared) prompt makes the result line stale.
   on('prompt.change', { origin: { kind: 'clear' } }, async ($, e, next) => {
     const s = await read($, status)
-    if (s.kind === 'advice' || s.kind === 'switched') await update($, status, () => IDLE)
+    if (s.kind !== 'idle' && s.kind !== 'busy') await setStatus($, IDLE)
     return next(e)
   })
 
@@ -142,29 +192,32 @@ export const register: Register = on => {
         <Button
           key="advise"
           hotkey="m"
-          label={s.kind === 'busy' ? 'Checking…' : 'Which model?'}
-          onPress={() => void advise($)}
+          variant="primary"
+          label={s.kind === 'busy' ? 'Picking model…' : 'Pick model'}
+          onPress={() => void adviseAndApply($)}
         />
-        {s.kind === 'advice' && !onModel(s.advice.current, s.advice.model) && (
-          <Button
-            key="switch"
-            hotkey="s"
-            variant="primary"
-            label={`Switch to ${NAMES[s.advice.model]}`}
-            onPress={() => void switchTo($, s.advice.model)}
-          />
+        {s.kind === 'idle' && <Text dimColor> picks and switches model + effort · ctrl+x m · /model-advice</Text>}
+        {s.kind === 'busy' && <Text dimColor> reading your draft…</Text>}
+        {s.kind === 'applied' && (
+          <Text>
+            {' '}Switched to {label(s.advice)} <Text dimColor>(was {s.previous})</Text>
+          </Text>
         )}
-        {s.kind === 'idle' && <Text dimColor> ctrl+x m · or /model-advice</Text>}
-        {s.kind === 'error' && <Text dimColor> failed: {s.message}</Text>}
-        {s.kind === 'switched' && <Text dimColor> switched to {NAMES[s.model]}; your draft is untouched</Text>}
+        {s.kind === 'applied' && (
+          <Button key="undo" hotkey="u" label="Undo" onPress={() => void undo($, s.previous)} />
+        )}
+        {s.kind === 'kept' && <Text> Already on the right model: {label(s.advice)}</Text>}
+        {s.kind === 'undone' && <Text dimColor> back on {s.model}</Text>}
+        {s.kind === 'error' && <Text color="error"> failed: {s.message}</Text>}
       </Box>
     )
+    const reason = s.kind === 'applied' || s.kind === 'kept' ? s.advice.reason : ''
 
     return (
       <Box key="advisor" flexDirection="column">
         {others}
         {row}
-        {s.kind === 'advice' && <Text wrap="wrap">{describe(s.advice)}</Text>}
+        {reason !== '' && <Text dimColor wrap="wrap">{reason}</Text>}
       </Box>
     )
   })

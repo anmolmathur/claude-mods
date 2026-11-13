@@ -1,1 +1,1 @@
-{ "name": "model-advisor", "version": "0.1.0", "description": "Reads your draft prompt and recommends which Claude model (and effort) fits the task, with one-click switch", "types": "./types/index.d.ts", "license": "MIT" }
+{ "name": "model-advisor", "version": "0.2.0", "description": "One click reads your draft, picks the right Claude model and effort for the task, and switches to them", "types": "./types/index.d.ts", "license": "MIT" }

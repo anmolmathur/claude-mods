@@ -5,11 +5,14 @@ export type AdvisorStatus =
   | { kind: 'idle' }
   | { kind: 'busy' }
   | { kind: 'error'; message: string }
-  | { kind: 'advice'; advice: Advice }
-  | { kind: 'switched'; model: ModelAlias }
+  // One click: the advice was applied (model and effort switched).
+  | { kind: 'applied'; advice: Advice; previous: string; isModelChanged: boolean }
+  // The session was already on the suggested model; only the effort was set.
+  | { kind: 'kept'; advice: Advice }
+  | { kind: 'undone'; model: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'model-advisor': { status: AdvisorStatus; lastDraft: string }
+    'model-advisor': { status: Shaped<AdvisorStatus>; lastDraft: string }
   }
 }
