@@ -1,0 +1,1 @@
+{ "name": "fix-prompt", "version": "0.1.0", "description": "Fix prompt button: rewrites your draft for spelling, grammar and clarity and puts it back in the input for review", "types": "./types/index.d.ts", "license": "MIT" }

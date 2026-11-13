@@ -1,0 +1,8 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "anmolmathur" },
+  "plugins": [
+    { "name": "fix-prompt", "source": "./fix-prompt", "description": "Fix prompt button: corrects spelling and grammar and clarifies your draft, then puts it back in the input for review" },
+    { "name": "model-advisor", "source": "./model-advisor", "description": "Reads your draft prompt and recommends which Claude model and effort fit the task, with one-click switch" }
+  ]
+}
